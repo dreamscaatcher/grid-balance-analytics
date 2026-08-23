@@ -1,0 +1,112 @@
+// DAX measures for grid-balance-analytics.
+// All real computation (MAE, RMSE, MAPE, shares, forecast error, MWh
+// conversion) already happened in sql/30_marts/30_kpis.sql. These measures
+// are deliberately thin wrappers -- SUM/AVERAGE/MIN/MAX pass-throughs over
+// the kpi_* views -- so Power BI aggregates and visualizes without
+// re-deriving anything the SQL layer already did.
+//
+// Import each kpi_* view as its own table in Power BI (Get Data -> BigQuery
+// -> grid-analysis-505021 -> grid_marts -> the kpi_ views only, not the
+// fact/dim tables directly). Relate dim_date to each kpi_* table's [date]
+// column for the shared date-range slicer.
+
+// ============================================================
+// Page 1 -- Executive overview
+// ============================================================
+
+Total Consumption (MWh) = SUM ( kpi_total_consumption_summary[total_consumption_mwh] )
+
+Total Consumption Trend (MWh) = SUM ( kpi_total_consumption_daily[total_consumption_mwh] )
+
+Mean Load (MW) = AVERAGE ( kpi_mean_load[mean_load_mw] )
+
+Mean Peak Load (MW) = AVERAGE ( kpi_mean_load[mean_peak_load_mw] )
+
+Mean Off-Peak Load (MW) = AVERAGE ( kpi_mean_load[mean_offpeak_load_mw] )
+
+Generation (MWh) = SUM ( kpi_energy_mix_daily[generation_mwh] )
+
+Generation Share of Total = AVERAGE ( kpi_energy_mix_share[share_of_total] )
+
+// Distribution visuals (histogram / box plot) bind directly to
+// kpi_load_distribution_raw[actual_load_mw] and kpi_load_profile_by_hour --
+// no measure needed, Power BI's own binning handles it.
+
+// ============================================================
+// Page 2 -- Grid balance operations deep-dive
+// ============================================================
+
+Load Forecast MAE (MW) = AVERAGE ( kpi_load_forecast_accuracy[mae_mw] )
+
+Load Forecast RMSE (MW) = AVERAGE ( kpi_load_forecast_accuracy[rmse_mw] )
+
+Load Forecast MAPE % = AVERAGE ( kpi_load_forecast_accuracy[mape_pct] )
+
+Renewable Forecast MAE (MW) = AVERAGE ( kpi_renewable_forecast_accuracy[mae_mw] )
+
+Likely Curtailment Hours = SUM ( kpi_renewable_forecast_accuracy[likely_curtailment_hours] )
+
+// Label this visual explicitly as "inferred" per docs/data_dictionary.md --
+// it's a proxy signal (actual < 80% of forecast while price <= 0), not a
+// directly reported curtailment figure.
+
+Net Export (MWh) = SUM ( kpi_crossborder_net_flow_daily[net_export_mwh] )
+
+// ============================================================
+// Page 3 -- Commercial / price view
+// ============================================================
+
+Avg Day-Ahead Price (EUR/MWh) = AVERAGE ( kpi_price_stats_daily[avg_price_eur_mwh] )
+
+Min Day-Ahead Price (EUR/MWh) = MIN ( kpi_price_stats_daily[min_price_eur_mwh] )
+
+Max Day-Ahead Price (EUR/MWh) = MAX ( kpi_price_stats_daily[max_price_eur_mwh] )
+
+Price Volatility (StdDev) = AVERAGE ( kpi_price_stats_daily[price_volatility] )
+
+Negative Price Hours = SUM ( kpi_price_stats_daily[negative_price_hours] )
+
+// Denominator: 15-min MTU granularity confirmed for DE-LU (see
+// sql/30_marts/30_kpis.sql header) -- 96 MTUs/day, so this is really a
+// share of quarter-hours, though the project's own docs call them "hours".
+Negative Price Hours % =
+DIVIDE (
+    [Negative Price Hours],
+    COUNTROWS ( kpi_price_stats_daily ) * 96
+)
+
+Renewable Share % (vs. Price) = AVERAGE ( kpi_price_vs_renewable_share[renewable_share_pct] )
+
+// ============================================================
+// Page 4 -- Fossil fuel drivers (night / weather / price)
+// ============================================================
+// All fields for this page come from ONE table, kpi_fossil_drivers_daily
+// (2 rows per date: Day and Night) -- no relationships needed to build it.
+
+Fossil Generation (MWh) = SUM ( kpi_fossil_drivers_daily[fossil_generation_mwh] )
+
+// Other (non-fossil) Generation (MWh) = SUM ( kpi_fossil_drivers_daily[other_generation_mwh] )
+// The view stores fossil_generation_mwh and total_generation_mwh, not a
+// separate non-fossil column -- this measure is the one place in Page 4
+// that isn't a pure pass-through, since it derives "other" as the
+// complement. Kept as a subtraction of two already-computed SQL sums
+// (no re-derivation of MAE/shares/etc.), consistent with "DAX measures are
+// thin wrappers, the SQL layer is the source of truth for computation."
+// Used as the second stacked-column series (with Fossil Generation (MWh))
+// on the Page 4 "Line and Stacked Column Chart" visuals, split into a
+// Normal Days chart and a Bad Weather Days chart via the
+// is_low_renewable_weather_day filter.
+Other Generation (MWh) =
+    SUM ( kpi_fossil_drivers_daily[total_generation_mwh] )
+        - SUM ( kpi_fossil_drivers_daily[fossil_generation_mwh] )
+
+Fossil Share % = AVERAGE ( kpi_fossil_drivers_daily[fossil_share_pct] )
+
+Avg Wind Speed (m/s) = AVERAGE ( kpi_fossil_drivers_daily[avg_wind_speed_ms] )
+
+Avg Sunshine (min) = AVERAGE ( kpi_fossil_drivers_daily[avg_sunshine_min] )
+
+// "Low pressure day" isn't in the data (DWD pull is wind + sunshine only) --
+// this flags a bottom-quartile wind AND bottom-quartile sunshine day, the
+// actual driver of reduced renewable output. See sql/30_marts/30_kpis.sql.
+Fossil Driver Avg Price (EUR/MWh) = AVERAGE ( kpi_fossil_drivers_daily[avg_price_eur_mwh] )

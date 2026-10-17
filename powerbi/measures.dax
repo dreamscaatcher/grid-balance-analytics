@@ -1,112 +1,183 @@
 // DAX measures for grid-balance-analytics.
-// All real computation (MAE, RMSE, MAPE, shares, forecast error, MWh
-// conversion) already happened in sql/30_marts/30_kpis.sql. These measures
-// are deliberately thin wrappers -- SUM/AVERAGE/MIN/MAX pass-throughs over
-// the kpi_* views -- so Power BI aggregates and visualizes without
-// re-deriving anything the SQL layer already did.
 //
-// Import each kpi_* view as its own table in Power BI (Get Data -> BigQuery
-// -> grid-analysis-505021 -> grid_marts -> the kpi_ views only, not the
-// fact/dim tables directly). Relate dim_date to each kpi_* table's [date]
-// column for the shared date-range slicer.
+// Computation of MAE, RMSE, MAPE, MWh, fossil share, renewable share, and
+// the curtailment count stays in sql/30_marts/30_kpis.sql. These measures
+// aggregate those columns. They do not re-derive the KPI formulas.
+//
+// Two presentation rules, both from the live-report review:
+//   1. Average a share or a mean. Summing them is what produced
+//      "Sum of mean_load_mw", fossil shares above 1, and a donut centre of 1.00.
+//   2. The number format is a model property, not FORMAT(). FORMAT() returns
+//      text and breaks chart axes. Set each measure's Format to the string
+//      on its "Format:" line (Model view → measure → Format).
+//
+// Ratio columns (renewable_share_pct, fossil_share_pct, and Generation Mix
+// Share %) are 0–1 fractions, so their format is a percent. mape_pct is
+// already multiplied by 100 in SQL, so its format is a plain number and the
+// percent sign lives in the measure name.
+//
+// Import, in Import mode, from grid-analysis-505021.grid_marts:
+//   dim_date, dim_production_type, dim_neighbour,
+//   and the kpi_* views named below.
+// Do not import fact tables, kpi_mean_load, kpi_total_consumption_summary,
+// or kpi_energy_mix_share. Those last three are period aggregates; dropping
+// their columns on a card is what summed an average.
+// Mark dim_date as a date table on [date]. Relationships are listed in
+// powerbi/DASHBOARD_SPEC.md.
+//
+// Format string cheat-sheet
+//   #,0        thousands, whole number     MWh totals, hour counts
+//   #,0.0      thousands, one decimal      MW
+//   #,0.00     thousands, two decimals     EUR/MWh, MAPE, wind speed
+//   0.00%      percent from a 0–1 ratio    shares
 
 // ============================================================
 // Page 1 -- Executive overview
 // ============================================================
 
-Total Consumption (MWh) = SUM ( kpi_total_consumption_summary[total_consumption_mwh] )
+// Format: #,0
+// Display units: None. The unit is the name (MWh), not an auto "M".
+Total Consumption (MWh) = SUM ( kpi_total_consumption_daily[total_consumption_mwh] )
 
-Total Consumption Trend (MWh) = SUM ( kpi_total_consumption_daily[total_consumption_mwh] )
+// Format: #,0.0
+Mean Load (MW) = AVERAGE ( kpi_load_distribution_raw[actual_load_mw] )
 
-Mean Load (MW) = AVERAGE ( kpi_mean_load[mean_load_mw] )
+// Format: #,0.0
+// is_peak is the SQL EPEX flag: weekday, hour 8 through 19.
+Mean Peak Load (MW) =
+CALCULATE (
+    AVERAGE ( kpi_load_distribution_raw[actual_load_mw] ),
+    KEEPFILTERS ( kpi_load_distribution_raw[is_peak] = TRUE )
+)
 
-Mean Peak Load (MW) = AVERAGE ( kpi_mean_load[mean_peak_load_mw] )
+// Format: #,0.0
+Mean Off-Peak Load (MW) =
+CALCULATE (
+    AVERAGE ( kpi_load_distribution_raw[actual_load_mw] ),
+    KEEPFILTERS ( kpi_load_distribution_raw[is_offpeak] = TRUE )
+)
 
-Mean Off-Peak Load (MW) = AVERAGE ( kpi_mean_load[mean_offpeak_load_mw] )
-
+// Format: #,0
 Generation (MWh) = SUM ( kpi_energy_mix_daily[generation_mwh] )
 
-Generation Share of Total = AVERAGE ( kpi_energy_mix_share[share_of_total] )
+// Format: 0.00%
+// Donut values. Numerator is the slice; denominator is the same generation
+// with the legend's category and production-type filters released, so date
+// and the other slicers still apply. A slice reads 65.06%, and the slices
+// in view add to 100%. Do not also turn on "percent of total" labels, and
+// do not put share_of_total on the visual (that column sums to 1).
+Generation Mix Share % =
+DIVIDE (
+    SUM ( kpi_energy_mix_daily[generation_mwh] ),
+    CALCULATE (
+        SUM ( kpi_energy_mix_daily[generation_mwh] ),
+        ALLSELECTED ( dim_production_type[category] ),
+        ALLSELECTED ( dim_production_type[production_type_name] ),
+        ALLSELECTED ( kpi_energy_mix_daily[category] ),
+        ALLSELECTED ( kpi_energy_mix_daily[production_type_name] )
+    )
+)
 
-// Distribution visuals (histogram / box plot) bind directly to
-// kpi_load_distribution_raw[actual_load_mw] and kpi_load_profile_by_hour --
-// no measure needed, Power BI's own binning handles it.
+// Calculated column on kpi_load_distribution_raw, not a measure.
+// Used only by the Load Distribution column chart.
+// Load Bin (MW) = INT ( kpi_load_distribution_raw[actual_load_mw] / 2000 ) * 2000
 
 // ============================================================
 // Page 2 -- Grid balance operations deep-dive
 // ============================================================
 
+// Format: #,0.0
+Actual Load (MW) = AVERAGE ( kpi_load_forecast_accuracy[avg_actual_load_mw] )
+
+// Format: #,0.0
+Forecast Load (MW) = AVERAGE ( kpi_load_forecast_accuracy[avg_forecast_load_mw] )
+
+// Format: #,0.0
 Load Forecast MAE (MW) = AVERAGE ( kpi_load_forecast_accuracy[mae_mw] )
 
+// Format: #,0.0
 Load Forecast RMSE (MW) = AVERAGE ( kpi_load_forecast_accuracy[rmse_mw] )
 
-Load Forecast MAPE % = AVERAGE ( kpi_load_forecast_accuracy[mape_pct] )
+// Format: #,0.00
+// mape_pct is already on a 0–100 scale. Do not apply a percent format.
+Load Forecast MAPE (%) = AVERAGE ( kpi_load_forecast_accuracy[mape_pct] )
 
+// Format: #,0.0
 Renewable Forecast MAE (MW) = AVERAGE ( kpi_renewable_forecast_accuracy[mae_mw] )
 
+// Format: #,0
+// Count of quarter-hour MTUs. The visual title says these are inferred.
 Likely Curtailment Hours = SUM ( kpi_renewable_forecast_accuracy[likely_curtailment_hours] )
 
-// Label this visual explicitly as "inferred" per docs/data_dictionary.md --
-// it's a proxy signal (actual < 80% of forecast while price <= 0), not a
-// directly reported curtailment figure.
-
+// Format: #,0.0
+// Positive is net export, negative is net import.
 Net Export (MWh) = SUM ( kpi_crossborder_net_flow_daily[net_export_mwh] )
 
 // ============================================================
 // Page 3 -- Commercial / price view
 // ============================================================
 
+// Format: #,0.00
 Avg Day-Ahead Price (EUR/MWh) = AVERAGE ( kpi_price_stats_daily[avg_price_eur_mwh] )
 
+// Format: #,0.00
 Min Day-Ahead Price (EUR/MWh) = MIN ( kpi_price_stats_daily[min_price_eur_mwh] )
 
+// Format: #,0.00
 Max Day-Ahead Price (EUR/MWh) = MAX ( kpi_price_stats_daily[max_price_eur_mwh] )
 
+// Format: #,0.00
 Price Volatility (StdDev) = AVERAGE ( kpi_price_stats_daily[price_volatility] )
 
+// Format: #,0
 Negative Price Hours = SUM ( kpi_price_stats_daily[negative_price_hours] )
 
-// Denominator: 15-min MTU granularity confirmed for DE-LU (see
-// sql/30_marts/30_kpis.sql header) -- 96 MTUs/day, so this is really a
-// share of quarter-hours, though the project's own docs call them "hours".
+// Format: 0.00%
+// Denominator: 15-min MTU granularity for DE-LU, 96 MTUs on a 24-hour day.
+// The project's docs call these quarter-hours "hours".
 Negative Price Hours % =
 DIVIDE (
     [Negative Price Hours],
     COUNTROWS ( kpi_price_stats_daily ) * 96
 )
 
-Renewable Share % (vs. Price) = AVERAGE ( kpi_price_vs_renewable_share[renewable_share_pct] )
+// Format: 0.00%
+// renewable_share_pct is a 0–1 ratio. Percent format is what turns 0.65 into 65%.
+Renewable Share % = AVERAGE ( kpi_price_vs_renewable_share[renewable_share_pct] )
 
 // ============================================================
 // Page 4 -- Fossil fuel drivers (night / weather / price)
 // ============================================================
-// All fields for this page come from ONE table, kpi_fossil_drivers_daily
-// (2 rows per date: Day and Night) -- no relationships needed to build it.
 
+// Format: #,0
 Fossil Generation (MWh) = SUM ( kpi_fossil_drivers_daily[fossil_generation_mwh] )
 
-// Other (non-fossil) Generation (MWh) = SUM ( kpi_fossil_drivers_daily[other_generation_mwh] )
-// The view stores fossil_generation_mwh and total_generation_mwh, not a
-// separate non-fossil column -- this measure is the one place in Page 4
-// that isn't a pure pass-through, since it derives "other" as the
-// complement. Kept as a subtraction of two already-computed SQL sums
-// (no re-derivation of MAE/shares/etc.), consistent with "DAX measures are
-// thin wrappers, the SQL layer is the source of truth for computation."
-// Used as the second stacked-column series (with Fossil Generation (MWh))
-// on the Page 4 "Line and Stacked Column Chart" visuals, split into a
-// Normal Days chart and a Bad Weather Days chart via the
-// is_low_renewable_weather_day filter.
+// Format: #,0
+// Complement of the two SQL generation sums. Not a new share formula.
 Other Generation (MWh) =
     SUM ( kpi_fossil_drivers_daily[total_generation_mwh] )
         - SUM ( kpi_fossil_drivers_daily[fossil_generation_mwh] )
 
+// Format: 0.00%
+// Average, not sum. fossil_share_pct is a 0–1 ratio; summing the day and
+// night rows (and then the total row) is what produced values above 1.
+// On a table, the total of this measure is the average of the visible shares.
 Fossil Share % = AVERAGE ( kpi_fossil_drivers_daily[fossil_share_pct] )
 
+// Format: #,0.00
 Avg Wind Speed (m/s) = AVERAGE ( kpi_fossil_drivers_daily[avg_wind_speed_ms] )
 
+// Format: #,0.0
 Avg Sunshine (min) = AVERAGE ( kpi_fossil_drivers_daily[avg_sunshine_min] )
 
-// "Low pressure day" isn't in the data (DWD pull is wind + sunshine only) --
-// this flags a bottom-quartile wind AND bottom-quartile sunshine day, the
-// actual driver of reduced renewable output. See sql/30_marts/30_kpis.sql.
+// Format: #,0.00
 Fossil Driver Avg Price (EUR/MWh) = AVERAGE ( kpi_fossil_drivers_daily[avg_price_eur_mwh] )
+
+// No numeric format. Field-value colour for the fossil-share columns.
+// Orange marks a low-renewable-weather day; brown is every other day.
+Low-Renewable Day Colour =
+IF (
+    SELECTEDVALUE ( kpi_fossil_drivers_daily[low_renewable_day_label] ) = "Low-renewable day",
+    "#E65100",
+    "#6D4C41"
+)

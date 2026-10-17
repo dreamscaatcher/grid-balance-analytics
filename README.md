@@ -58,7 +58,7 @@ GCP project: `grid-analysis-505021`.
 3. **DWD**: no auth needed, public file server.
 4. Run the pipeline: `python -m pipeline.run_pipeline`. **Done (2026-08-10, ~14:47-14:52 UTC)** -- all 8 raw tables landed with real data, verified via `bq` on 2026-08-20.
 5. Run `sql/00_setup` through `sql/30_marts` in order (e.g. via `bq query` or BigQuery Studio). **Done (2026-08-10)** -- staging and marts, including all KPI views, are live in BigQuery.
-6. Build the dashboard: `powerbi/DASHBOARD_SPEC.md` (measures in `powerbi/measures.dax`). **In progress (2026-08-20)** -- Pages 1 and 3 complete, Page 2 missing one chart, Page 4 (new, not in the original storyboard) planned but blocked on step 7.
+6. Build the dashboard: `powerbi/DASHBOARD_SPEC.md` (measures in `powerbi/measures.dax`). **Checklist updated (2026-10-17)** -- that spec is the page-by-page source of truth for titles, formats, the date axis, partial-day handling, and slicers. Apply it in Power BI after re-running the marts SQL. See `CHANGELOG.md`.
 7. New KPI view for a 4th page (fossil fuel use at night / bad weather / price effect): `kpi_fossil_drivers_daily` in `sql/30_marts/30_kpis.sql`. **Done (2026-08-20)** -- live on the 180-day window (2026-02-20 to 2026-08-19), ready for Power BI.
 
 Ingestion uses [`entsoe-apy`](https://entsoe-apy.berrisch.biz/) (not the older `entsoe-py`) -- its classes mirror the official ENTSO-E API doc sections one-to-one.
@@ -73,6 +73,7 @@ sql/                 Warehouse models, executed in order: 00_setup / 10_raw / 20
 tests/               pytest suite
 powerbi/             Dashboard build spec + DAX measures
 docs/                KPI definitions, data dictionary
+CHANGELOG.md         Warehouse and dashboard-spec changes
 ```
 
 ## Data honesty
@@ -89,4 +90,6 @@ A 4th page was requested mid-build, not part of the original 3-page storyboard: 
 
 The pipeline was also widened from a 90-day to a 180-day trailing window on 2026-08-20 (2026-02-20 to 2026-08-19). Doing so surfaced a real bug: `fetch_generation_actual` hit `httpx.ReadTimeout` on every attempt at the wider range -- not because of payload size (a single 90-day chunk failed identically), but because `entsoe-apy` defaults to a 20-second read timeout that was too tight for how slowly ENTSO-E was responding that day. Fixed by setting `entsoe.config.set_config(timeout=90)` in `pipeline/config.py`. All raw, staging, and marts tables have been rebuilt on the wider window.
 
-`powerbi/measures.dax` has been filled in with real pass-through measures for all four pages (see file). One measure in there, `Load Distribution HTML`, is unused leftover from an abandoned attempt to build the histogram with the custom "HTML Content" AppSource visual (it rendered unreliably -- blank canvas, CSS sizing issues inside the visual's sandbox) -- safe to delete, or ignore. A second custom visual, "Histogram Chart", was also tried and abandoned (rendered fully blank). The Load Distribution visual that's actually live uses a standard Clustered Column Chart against a `Load Bin (MW)` calculated column (`INT(actual_load_mw/2000)*2000`) with Count aggregation, which is what worked -- along with every other visual built since, all native Power BI chart types.
+`powerbi/measures.dax` has been filled in with real pass-through measures for all four pages (see file). A presentation pass on 2026-10-17 keeps those KPI formulas and makes the repo the source of truth for the cleaned-up report: official production-type names on the marts views, `dim_date.is_partial_day` for the short first and last day (rows stay in the tables), format strings and average-based share measures in `powerbi/measures.dax`, and the build checklist in `powerbi/DASHBOARD_SPEC.md`. Details are in `CHANGELOG.md`. Re-run `sql/30_marts` before refreshing Power BI.
+
+One measure that was tried in the model, `Load Distribution HTML`, is unused leftover from an abandoned attempt to build the histogram with the custom "HTML Content" AppSource visual (it rendered unreliably -- blank canvas, CSS sizing issues inside the visual's sandbox) -- safe to delete, or ignore. A second custom visual, "Histogram Chart", was also tried and abandoned (rendered fully blank). The Load Distribution visual that's actually live uses a standard Clustered Column Chart against a `Load Bin (MW)` calculated column (`INT(actual_load_mw/2000)*2000`) with Count aggregation, which is what worked -- along with every other visual built since, all native Power BI chart types.

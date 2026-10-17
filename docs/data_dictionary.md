@@ -49,7 +49,17 @@ No synthetic data in this project -- unlike rail-ops-analytics, there's no comme
 | B19 | Wind Onshore | Renewable |
 | B20 | Other | Other |
 
+Titles checked 2026-10-17 against the ENTSO-E Common Code Lists v36r0 Asset Type list (`B01` "Biomass" through `B20` "Other", including `B11` "Hydro Run-of-river and poundage") and the entsoe-apy PSR notes. `production_type_label` is the code plus that title (`B19 Wind Onshore`). `category_sort` and `type_sort` are the Power BI sort keys. Chart legends use `production_type_name`. Later CIM codelists retitle some of these codes; Transparency Platform generation in this warehouse still uses the titles in the table.
+
 This is the full standard ENTSO-E PSR type list -- Germany won't populate every row (e.g. B08 Fossil Peat, B13 Marine are not present in the DE generation mix); those codes simply won't appear in `grid_raw.generation_actual` and any join against them returns nothing, which is fine.
+
+## Date dimension (`dim_date`)
+
+One row per civil date from the first to the last load date. Daily chart axes use `date`. `day_of_month` is not an axis (it collapses the same day number across months).
+
+`is_partial_day` is true only when the date is the first or last load date and its quarter-hour count is below the full Europe/Brussels civil day: 92 (spring DST), 96 (normal), or 100 (autumn DST). Those rows stay in the facts and KPI views. `load_mtu_count` and `expected_mtu_count` are the two numbers behind the flag.
+
+`is_low_renewable_weather_day` and `low_renewable_day_label` use the bottom-quartile wind and sunshine rule documented in `kpi_definitions.md`. The label is `Low-renewable day`, `Other day`, or `Unknown`.
 
 ## Known open items
 

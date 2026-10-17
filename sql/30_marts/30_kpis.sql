@@ -1,17 +1,32 @@
--- KPI views. These are what Power BI reads from -- no aggregation logic
--- should live in the dashboard itself. MW -> MWh conversion assumes 15-min
--- MTU (multiply by 0.25); ENTSO-E confirmed 15-min granularity for DE-LU.
+-- KPI views. These are what Power BI reads from. The aggregates below
+-- (MAE, RMSE, MAPE, MWh conversion, fossil share, renewable share,
+-- curtailment count) are unchanged. Added columns are names, sort keys,
+-- and is_partial_day so the report can label and filter without
+-- recomputing those figures or deleting the partial edge days.
+--
+-- MW -> MWh conversion assumes 15-min MTU (multiply by 0.25); ENTSO-E
+-- confirmed 15-min granularity for DE-LU.
+--
+-- Share columns named *_pct on these views (renewable_share_pct,
+-- fossil_share_pct) are ratios in [0, 1]. mape_pct is already x100.
+-- Power BI percent formats belong on the ratios only. See measures.dax.
 
 -- === Page 1: Executive overview ===
 
 -- 1. Total consumption
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_total_consumption_daily` AS
 SELECT
-  date,
-  SUM(actual_load_mw) * 0.25 AS total_consumption_mwh
-FROM `grid-analysis-505021.grid_marts.fact_load`
-GROUP BY date;
+  f.date,
+  d.is_partial_day,
+  SUM(f.actual_load_mw) * 0.25 AS total_consumption_mwh
+FROM `grid-analysis-505021.grid_marts.fact_load` f
+LEFT JOIN `grid-analysis-505021.grid_marts.dim_date` d
+  ON f.date = d.date
+GROUP BY f.date, d.is_partial_day;
 
+-- Period total across every landed MTU, partial edge days included.
+-- The dashboard card sums kpi_total_consumption_daily under the
+-- is_partial_day filter instead of reading this view.
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_total_consumption_summary` AS
 SELECT
   MIN(date) AS period_start,
@@ -19,11 +34,21 @@ SELECT
   SUM(actual_load_mw) * 0.25 AS total_consumption_mwh
 FROM `grid-analysis-505021.grid_marts.fact_load`;
 
--- 2. Distribution of consumption -- raw enough for Power BI's histogram/box
--- visual to bucket itself; grouped view for a "typical day" profile shape.
+-- 2. Distribution of consumption -- raw enough for Power BI's column
+-- chart to bucket itself. is_peak / is_offpeak repeat the EPEX rule in
+-- kpi_mean_load (weekday 08:00-19:59 vs everything else) so a measure can
+-- average the quarter-hours without hard-coding the hours in DAX.
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_load_distribution_raw` AS
-SELECT date, hour_of_day, actual_load_mw
-FROM `grid-analysis-505021.grid_marts.fact_load`;
+SELECT
+  f.date,
+  f.hour_of_day,
+  f.actual_load_mw,
+  d.is_partial_day,
+  (NOT d.is_weekend AND f.hour_of_day BETWEEN 8 AND 19) AS is_peak,
+  (d.is_weekend OR f.hour_of_day NOT BETWEEN 8 AND 19) AS is_offpeak
+FROM `grid-analysis-505021.grid_marts.fact_load` f
+LEFT JOIN `grid-analysis-505021.grid_marts.dim_date` d
+  ON f.date = d.date;
 
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_load_profile_by_hour` AS
 SELECT
@@ -38,6 +63,8 @@ LEFT JOIN `grid-analysis-505021.grid_marts.dim_date` d USING (date)
 GROUP BY f.hour_of_day, d.season;
 
 -- 3. Mean consumption -- overall, and peak (weekday 08:00-19:59) vs off-peak.
+-- Includes every MTU. Dashboard cards average kpi_load_distribution_raw
+-- so the date slicer and the partial-day filter apply to the same rule.
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_mean_load` AS
 SELECT
   AVG(f.actual_load_mw) AS mean_load_mw,
@@ -46,15 +73,33 @@ SELECT
 FROM `grid-analysis-505021.grid_marts.fact_load` f
 LEFT JOIN `grid-analysis-505021.grid_marts.dim_date` d USING (date);
 
--- 4. Energy mix -- generation share by type/category.
+-- 4. Energy mix -- generation by type/category. Names come from
+-- dim_production_type; the code stays on the row as the relationship key.
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_energy_mix_daily` AS
 SELECT
-  date,
-  category,
-  production_type,
-  SUM(generation_mw) * 0.25 AS generation_mwh
-FROM `grid-analysis-505021.grid_marts.fact_generation`
-GROUP BY date, category, production_type;
+  g.date,
+  d.is_partial_day,
+  COALESCE(pt.category, g.category) AS category,
+  pt.category_sort,
+  g.production_type,
+  COALESCE(pt.production_type_name, g.production_type) AS production_type_name,
+  COALESCE(pt.production_type_label, g.production_type) AS production_type_label,
+  pt.type_sort,
+  SUM(g.generation_mw) * 0.25 AS generation_mwh
+FROM `grid-analysis-505021.grid_marts.fact_generation` g
+LEFT JOIN `grid-analysis-505021.grid_marts.dim_date` d
+  ON g.date = d.date
+LEFT JOIN `grid-analysis-505021.grid_marts.dim_production_type` pt
+  ON g.production_type = pt.production_type
+GROUP BY
+  g.date,
+  d.is_partial_day,
+  COALESCE(pt.category, g.category),
+  pt.category_sort,
+  g.production_type,
+  COALESCE(pt.production_type_name, g.production_type),
+  COALESCE(pt.production_type_label, g.production_type),
+  pt.type_sort;
 
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_energy_mix_share` AS
 SELECT
@@ -68,12 +113,17 @@ GROUP BY category;
 
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_load_forecast_accuracy` AS
 SELECT
-  date,
-  AVG(ABS(forecast_error_mw)) AS mae_mw,
-  SQRT(AVG(POW(forecast_error_mw, 2))) AS rmse_mw,
-  AVG(ABS(forecast_error_mw) / NULLIF(actual_load_mw, 0)) * 100 AS mape_pct
-FROM `grid-analysis-505021.grid_marts.fact_load`
-GROUP BY date;
+  f.date,
+  d.is_partial_day,
+  AVG(f.actual_load_mw) AS avg_actual_load_mw,
+  AVG(f.forecast_load_mw) AS avg_forecast_load_mw,
+  AVG(ABS(f.forecast_error_mw)) AS mae_mw,
+  SQRT(AVG(POW(f.forecast_error_mw, 2))) AS rmse_mw,
+  AVG(ABS(f.forecast_error_mw) / NULLIF(f.actual_load_mw, 0)) * 100 AS mape_pct
+FROM `grid-analysis-505021.grid_marts.fact_load` f
+LEFT JOIN `grid-analysis-505021.grid_marts.dim_date` d
+  ON f.date = d.date
+GROUP BY f.date, d.is_partial_day;
 
 -- Renewable forecast accuracy + a rough curtailment signal: actual well
 -- below forecast while the day-ahead price is at or below zero suggests
@@ -81,37 +131,64 @@ GROUP BY date;
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_renewable_forecast_accuracy` AS
 SELECT
   f.date,
+  d.is_partial_day,
   f.production_type,
+  COALESCE(pt.production_type_name, f.production_type) AS production_type_name,
+  COALESCE(pt.production_type_label, f.production_type) AS production_type_label,
+  pt.category,
+  pt.category_sort,
+  pt.type_sort,
   AVG(ABS(f.forecast_error_mw)) AS mae_mw,
   COUNTIF(f.actual_mw < f.forecast_mw * 0.8 AND p.day_ahead_price_eur_mwh <= 0) AS likely_curtailment_hours
 FROM `grid-analysis-505021.grid_marts.fact_generation_forecast` f
-LEFT JOIN `grid-analysis-505021.grid_marts.fact_price` p USING (mtu_start)
-GROUP BY f.date, f.production_type;
+LEFT JOIN `grid-analysis-505021.grid_marts.fact_price` p
+  ON f.mtu_start = p.mtu_start
+LEFT JOIN `grid-analysis-505021.grid_marts.dim_production_type` pt
+  ON f.production_type = pt.production_type
+LEFT JOIN `grid-analysis-505021.grid_marts.dim_date` d
+  ON f.date = d.date
+GROUP BY
+  f.date,
+  d.is_partial_day,
+  f.production_type,
+  COALESCE(pt.production_type_name, f.production_type),
+  COALESCE(pt.production_type_label, f.production_type),
+  pt.category,
+  pt.category_sort,
+  pt.type_sort;
 
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_crossborder_net_flow_daily` AS
 SELECT
-  date,
-  neighbour_name,
-  SUM(IF(direction = 'export', flow_mw, -flow_mw)) * 0.25 AS net_export_mwh
-FROM `grid-analysis-505021.grid_marts.fact_crossborder_flow`
-GROUP BY date, neighbour_name;
+  f.date,
+  d.is_partial_day,
+  f.neighbour,
+  f.neighbour_name,
+  SUM(IF(f.direction = 'export', f.flow_mw, -f.flow_mw)) * 0.25 AS net_export_mwh
+FROM `grid-analysis-505021.grid_marts.fact_crossborder_flow` f
+LEFT JOIN `grid-analysis-505021.grid_marts.dim_date` d
+  ON f.date = d.date
+GROUP BY f.date, d.is_partial_day, f.neighbour, f.neighbour_name;
 
 -- === Page 3: Commercial / price view ===
 
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_price_stats_daily` AS
 SELECT
-  date,
-  AVG(day_ahead_price_eur_mwh) AS avg_price_eur_mwh,
-  MIN(day_ahead_price_eur_mwh) AS min_price_eur_mwh,
-  MAX(day_ahead_price_eur_mwh) AS max_price_eur_mwh,
-  STDDEV(day_ahead_price_eur_mwh) AS price_volatility,
-  COUNTIF(day_ahead_price_eur_mwh < 0) AS negative_price_hours
-FROM `grid-analysis-505021.grid_marts.fact_price`
-GROUP BY date;
+  p.date,
+  d.is_partial_day,
+  AVG(p.day_ahead_price_eur_mwh) AS avg_price_eur_mwh,
+  MIN(p.day_ahead_price_eur_mwh) AS min_price_eur_mwh,
+  MAX(p.day_ahead_price_eur_mwh) AS max_price_eur_mwh,
+  STDDEV(p.day_ahead_price_eur_mwh) AS price_volatility,
+  COUNTIF(p.day_ahead_price_eur_mwh < 0) AS negative_price_hours
+FROM `grid-analysis-505021.grid_marts.fact_price` p
+LEFT JOIN `grid-analysis-505021.grid_marts.dim_date` d
+  ON p.date = d.date
+GROUP BY p.date, d.is_partial_day;
 
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_price_vs_renewable_share` AS
 SELECT
   p.date,
+  d.is_partial_day,
   p.avg_price_eur_mwh,
   SAFE_DIVIDE(
     SUM(IF(g.category = 'Renewable', g.generation_mwh, 0)),
@@ -119,7 +196,9 @@ SELECT
   ) AS renewable_share_pct
 FROM `grid-analysis-505021.grid_marts.kpi_price_stats_daily` p
 LEFT JOIN `grid-analysis-505021.grid_marts.kpi_energy_mix_daily` g USING (date)
-GROUP BY p.date, p.avg_price_eur_mwh;
+LEFT JOIN `grid-analysis-505021.grid_marts.dim_date` d
+  ON p.date = d.date
+GROUP BY p.date, d.is_partial_day, p.avg_price_eur_mwh;
 
 -- === Page 4: Fossil fuel drivers (night / weather / price) ===
 
@@ -127,12 +206,10 @@ GROUP BY p.date, p.avg_price_eur_mwh;
 -- Night (everything else), with same-day weather and price alongside so
 -- Power BI can build this whole page off one table without relationships.
 --
--- Note on "low pressure days": this pipeline's DWD pull is wind speed +
--- sunshine duration only -- there's no barometric pressure feed. A
--- low-wind, low-sunshine day is used as the proxy instead, since that's
--- the actual mechanism that forces fossil generation up (renewables have
--- less to give, something has to fill the gap), and it's what "bad
--- weather" would show up as in this data anyway.
+-- The low-renewable-weather flag is defined once on dim_date (bottom
+-- quartile of daily average wind AND daily average sunshine). This view
+-- only carries that column forward, plus a short label for the table.
+-- There is no barometric pressure feed in the DWD pull.
 CREATE OR REPLACE VIEW `grid-analysis-505021.grid_marts.kpi_fossil_drivers_daily` AS
 WITH gen_hourly AS (
   SELECT
@@ -161,14 +238,6 @@ weather_daily AS (
   FROM `grid-analysis-505021.grid_marts.fact_weather`
   GROUP BY date
 ),
--- Bottom-quartile wind AND bottom-quartile sunshine, across the whole
--- period, flags a "bad weather for renewables" day.
-weather_thresholds AS (
-  SELECT
-    APPROX_QUANTILES(avg_wind_speed_ms, 4)[OFFSET(1)] AS wind_p25,
-    APPROX_QUANTILES(avg_sunshine_min, 4)[OFFSET(1)] AS sun_p25
-  FROM weather_daily
-),
 price_daily AS (
   SELECT date, AVG(day_ahead_price_eur_mwh) AS avg_price_eur_mwh
   FROM `grid-analysis-505021.grid_marts.fact_price`
@@ -176,16 +245,18 @@ price_daily AS (
 )
 SELECT
   gd.date,
+  d.is_partial_day,
   gd.day_night,
   gd.fossil_generation_mwh,
   gd.total_generation_mwh,
   gd.fossil_share_pct,
   w.avg_wind_speed_ms,
   w.avg_sunshine_min,
-  (w.avg_wind_speed_ms < t.wind_p25 AND w.avg_sunshine_min < t.sun_p25)
-    AS is_low_renewable_weather_day,
+  d.is_low_renewable_weather_day,
+  d.low_renewable_day_label,
   p.avg_price_eur_mwh
 FROM gen_daynight gd
 LEFT JOIN weather_daily w USING (date)
-CROSS JOIN weather_thresholds t
+LEFT JOIN `grid-analysis-505021.grid_marts.dim_date` d
+  ON gd.date = d.date
 LEFT JOIN price_daily p USING (date);

@@ -17,7 +17,10 @@ SELECT
   DATE(g.mtu_start) AS date,
   g.production_type,
   d.production_type_name,
+  d.production_type_label,
   d.category,
+  d.category_sort,
+  d.type_sort,
   g.generation_mw
 FROM `grid-analysis-505021.grid_staging.generation_actual` g
 LEFT JOIN `grid-analysis-505021.grid_marts.dim_production_type` d
@@ -28,12 +31,17 @@ SELECT
   f.mtu_start,
   DATE(f.mtu_start) AS date,
   f.production_type,
+  pt.production_type_name,
+  pt.production_type_label,
+  pt.category,
   f.forecast_mw,
   g.generation_mw AS actual_mw,
   g.generation_mw - f.forecast_mw AS forecast_error_mw
 FROM `grid-analysis-505021.grid_staging.wind_solar_forecast` f
 LEFT JOIN `grid-analysis-505021.grid_staging.generation_actual` g
-  USING (mtu_start, production_type);
+  USING (mtu_start, production_type)
+LEFT JOIN `grid-analysis-505021.grid_marts.dim_production_type` pt
+  USING (production_type);
 
 CREATE OR REPLACE TABLE `grid-analysis-505021.grid_marts.fact_price` AS
 SELECT
